@@ -1,0 +1,91 @@
+//@version=5
+strategy("Railroad", overlay=true, initial_capital=20000, default_qty_type=strategy.fixed, default_qty_value=1, margin_long=0, margin_short=0)
+
+// Inputs
+heures_trading = input.string("0300-1530", "Heures de trading NY EST")
+tp = input.float(10.25, "Take profit (handles)", step=0.25, group="Fixed profit taking") // 1 point = 4 ticks (adapté à NQ)
+drawRWR = input.bool(true, "Show SL and TP on chart", group="Fixed profit taking")
+slmax = input.float(37, "Maximum SL (handles)", step=0.25, group="ATR based Stop Loss settings")
+atrPeriod = input.int(title='ATR Period', defval=5, minval=1, group="ATR based Stop Loss settings", tooltip="This setting is used in the raw ATR value calculation.  Lower values will be more reactive to recent price movement, while higher values will better indicate loger-term trend.\n\n" +
+                 "Most often this is set at either 14 or 21.\nDefault: 3")
+atrMultiplier = input.float(title='ATR Band Scale Factor', defval=3, step=0.1, minval=0.01, group="ATR based Stop Loss settings", tooltip="Scaling factor (aka multiplier) for the ATR to use for plotting the ATR bands.  " +
+                     "This will usually be between 1 and 3.\n\nDefault: 2.5")
+drawATRbands = input.bool(false, "Show ATR channel", group="ATR based Stop Loss settings")
+timeoutPeriod = input.int(30, "Time based Exit (minutes)", minval=5, maxval=120)
+long_allowed = input.bool(true, "Autoriser positions LONG", group="Fixed profit taking")
+short_allowed = input.bool(true, "Autoriser positions SHORT", group="Fixed profit taking")
+
+// Restriction des heures de trading
+inKillzone = not na(time(timeframe.period, heures_trading, "America/New_York"))
+
+// Vérifier qu'aucun trade n'est en cours
+noTrade = strategy.position_size == 0
+ema50 = ta.ema(close,50)
+atr_detector = ta.atr(20)
+
+// Railroad Baissier
+range_green = close[1] - open[1]
+range_black = open - close
+green_wrb = (open[1] < close[1]) and range_green > atr_detector
+black_wrb = (open > close) and range_black > atr_detector and (range_black >= 0.8* range_green) and (range_black < 1.8 * range_green)
+shortEntry = green_wrb and black_wrb and noTrade and short_allowed
+
+// Railroad haussier
+range_black := open[1] - close[1]
+range_green := close - open
+black_wrb := (open[1] > close[1]) and range_black > atr_detector
+green_wrb := (open < close) and range_green > atr_detector and (range_green >= 0.8* range_black) and (range_green < 1.8 * range_black)
+longEntry = black_wrb and green_wrb and noTrade and long_allowed
+
+//  ATR based Stop Loss computation
+scaledATR = ta.atr(atrPeriod) * atrMultiplier
+sl = math.round(math.min(slmax,scaledATR))  // Stop Loss defined by ATR
+upperATRBand = close + scaledATR
+lowerATRBand = close - scaledATR
+
+// Définition des targets et SL
+point = syminfo.mintick * 4  // Ajustement en fonction de l'échelle de l'actif
+longTP = close + tp * point
+longSL = close - sl * point
+shortTP = close - tp * point
+shortSL = close + sl * point
+
+// TradingView alerts variables
+//    - plot_0 is the Take Profit
+//    - plot_1 is the Stop Loss
+plot(shortEntry ? shortTP : longTP, title="Take Profit", color = color.new(color.white, 20), display = display.status_line)
+plot(shortEntry ? shortSL : longSL, title="Stop Loss", color = color.new(color.white, 20), display = display.status_line)
+
+// Placer les ordres
+if shortEntry and inKillzone //and canTrade
+    strategy.order("Short", strategy.short, qty=1, limit=close)
+    strategy.exit("Short Exit", from_entry="Short", stop=shortSL, limit=shortTP)
+    label.new(bar_index, high + 1, text="Short", color=color.red, textcolor=color.white, style=label.style_label_down)
+    if drawRWR // Stop Zone (Red) and Target Zone (Green)
+        box.new(left=bar_index, right=bar_index + 5, top=shortSL, bottom=close, border_color=color.red, bgcolor=color.new(color.red, 80), text="SL: " + str.tostring(shortSL-close), text_size = size.small, text_halign = text.align_right, text_valign = text.align_top)
+        box.new(left=bar_index, right=bar_index + 5, top=close, bottom=shortTP, border_color=color.green, bgcolor=color.new(color.green, 80))
+
+if longEntry and inKillzone  //and canTrade
+    strategy.order("Long", strategy.long, qty=1, limit=close)
+    strategy.exit("Long Exit", from_entry="Long", stop=longSL, limit=longTP)
+    label.new(bar_index, low - 1, text="Long", color=color.green, textcolor=color.white, style=label.style_label_up)
+    if drawRWR // Stop Zone (Red) and Target Zone (Green)
+        box.new(left=bar_index, right=bar_index + 5, top=close, bottom=longSL, border_color=color.red, bgcolor=color.new(color.red, 80), text="SL: " + str.tostring(close-longSL), text_size = size.small, text_halign = text.align_right, text_valign = text.align_bottom)
+        box.new(left=bar_index, right=bar_index + 5, top=longTP, bottom=close, border_color=color.green, bgcolor=color.new(color.green, 80))
+
+var int entryTime = 0
+if (strategy.position_size[1] == 0) and (strategy.position_size != 0)
+    // trade just opened
+    entryTime := time
+
+// Time-based exit
+if strategy.position_size != 0
+    if (time - entryTime) >= timeoutPeriod * 60000  // Convert minutes to milliseconds
+        strategy.close_all(comment="Time Exit")
+
+// Plot current position
+bgcolor(strategy.position_size > 0 ? color.new(color.blue, 90) : strategy.position_size < 0 ? color.new(color.blue, 90) : na)
+
+//ATR Band Plotting
+plot(drawATRbands ? upperATRBand : na, title="Upper ATR Band", color=color.rgb(0, 255, 0, 50), linewidth=2)
+plot(drawATRbands ? lowerATRBand : na, title="Lower ATR Band", color=color.rgb(255, 0, 0, 50), linewidth=2)
